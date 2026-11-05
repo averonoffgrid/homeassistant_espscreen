@@ -100,8 +100,8 @@
       "days_hours": "{d} d {h} godz."
     },
     "status": {
-      "connecting": "Czekam na Home Assistant",
-      "waiting": "Czekam na Tessera",
+      "connecting": "Logowanie do serwera",
+      "waiting": "Logowanie do serwera",
       "loading_tiles": "Ładowanie kafelków...",
       "preparing_pages": "Przygotowywanie stron {n}/{total}",
       "ha_not_connected": "HA niepołączony",
