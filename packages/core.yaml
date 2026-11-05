@@ -149,7 +149,7 @@ esphome:
           runtime_tiles::clock_font = id(clock_digits)->get_lv_font();
           runtime_tiles::bedside_font = id(bedside_digits)->get_lv_font();
           runtime_tiles::display_font = id(display_digits)->get_lv_font();
-          runtime_tiles::brand_font = id(brand_wordmark)->get_lv_font();
+          runtime_tiles::brand_font = nullptr; // Nocte logo supplied as a complete PNG wordmark
           runtime_tiles::brand_mark = id(tessera_mark)->get_lv_image_dsc();
           runtime_tiles::firmware_version = "${SCREEN_FIRMWARE_VERSION}";
           runtime_tiles::now_time = []() { return id(homeassistant_time).now(); };
@@ -855,14 +855,14 @@ globals:
 # (min_version) knows; 2026.7+ reads it as `platform: file`.
 image:
   - id: tessera_mark
-    file: "${FONT_DIR}/tessera-mark.png"
+    file: "${FONT_DIR}/nocte-wordmark.png"
     type: RGB565
     transparency: alpha_channel
-    resize: ${BRAND_MARK_SIZE}x${BRAND_MARK_SIZE}
+    resize: 260x108
   # The home key at the far left of the top bar (firmware 0.10.0+): the same mark as tall as the house that stood there
   # before, a house of Material Design Icons at FONT_ICON_HOME_SIZE (17 of its 24 units), about a kilobyte per board.
   - id: tessera_mark_bar
-    file: "${FONT_DIR}/tessera-mark.png"
+    file: "${FONT_DIR}/nocte-mark.png"
     type: RGB565
     transparency: alpha_channel
     resize: ${ ((FONT_ICON_HOME_SIZE | int) * 17 / 24) | round | int }x${ ((FONT_ICON_HOME_SIZE | int) * 17 / 24) | round | int }
@@ -1013,7 +1013,7 @@ font:
     id: brand_wordmark
     size: ${FONT_BRAND_SIZE}
     bpp: 4
-    glyphs: ['t','e','s','r','a']
+    glyphs: ['n','o','c','t','e']
 
   # Material Design Icons (MDI) — included at fonts/materialdesignicons-webfont.ttf (Apache 2.0)
   # Source: https://github.com/Templarian/MaterialDesign-Webfont
