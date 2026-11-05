@@ -865,7 +865,7 @@ image:
     file: "${FONT_DIR}/nocte-mark-v2.png"
     type: RGB565
     transparency: alpha_channel
-    resize: ${ ((FONT_ICON_HOME_SIZE | int) * 17 / 24) | round | int }x${ ((FONT_ICON_HOME_SIZE | int) * 17 / 24) | round | int }
+    resize: ${ ((FONT_ICON_HOME_SIZE | int) * 9 / 10) | round | int }x${ ((FONT_ICON_HOME_SIZE | int) * 9 / 10) | round | int }
 
 font:
   # The five text fonts (headline, watch_value, label, sublabel, sublabel_big) carry the same characters, the ones
