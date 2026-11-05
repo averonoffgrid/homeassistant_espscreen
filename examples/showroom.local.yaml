@@ -65,7 +65,8 @@ i2c:
   id: touch_bus
   sda: GPIO15
   scl: GPIO7
-  frequency: 100kHz  # diagnostyka, najpierw stabilne I2C
+  frequency: 100kHz  # wspolna magistrala: dotyk + PCA9554 + SHT30 + VL53L0X
+  timeout: 10ms      # ogranicza czas oczekiwania na transfer I2C w ESP-IDF
   scan: true
 
 pca9554:
@@ -78,6 +79,38 @@ globals:
     type: float
     restore_value: no
     initial_value: '-1.0'
+  - id: nocte_sht_temp_last_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: nocte_sht_humidity_last_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: nocte_tof_sample_last_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: nocte_tof_distance_cm
+    type: float
+    restore_value: no
+    initial_value: 'NAN'
+  - id: nocte_target_near
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: nocte_near_hits
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: nocte_far_hits
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: nocte_auto_dimmed
+    type: bool
+    restore_value: no
+    initial_value: 'false'
 
 # Podswietlenie Waveshare: EXIO2/P1 to fizyczne EN przetwornicy LED.
 # W odroznieniu od poprzedniego power_supply, ten profil steruje EN
@@ -287,6 +320,39 @@ text_sensor:
       ESP_LOGI("touch_diag", "PCA9554 0x20: odpowiedz I2C");
       return {"OK 0x20"};
 
+  - platform: template
+    id: nocte_distance_zone
+    name: "Nocte Strefa odleglosci"
+    icon: mdi:map-marker-distance
+    update_interval: 1s
+    lambda: |-
+      const uint32_t now = millis();
+      if (!id(nocte_tof_responds).state) return {"Brak komunikacji I2C"};
+      if (id(nocte_tof_sample_last_ms) == 0 ||
+          (uint32_t)(now - id(nocte_tof_sample_last_ms)) > 4000UL)
+        return {"Brak nowych odczytow"};
+      const float cm = id(nocte_tof_distance_cm);
+      if (!std::isfinite(cm)) return {"Poza zasiegiem"};
+      if (cm <= id(nocte_activation_distance).state) return {"Blisko"};
+      if (cm <= id(nocte_activation_distance).state + 20.0f) return {"Strefa histerezy"};
+      return {"Daleko"};
+
+  - platform: template
+    id: nocte_presence_status
+    name: "Nocte Stan automatyki"
+    icon: mdi:information-outline
+    entity_category: diagnostic
+    update_interval: 2s
+    lambda: |-
+      if (!id(nocte_presence_switch).state) return {"Wylaczona"};
+      if (!id(nocte_tof_responds).state) return {"Blad komunikacji VL53L0X"};
+      if (id(nocte_tof_sample_last_ms) == 0 ||
+          (uint32_t)(millis() - id(nocte_tof_sample_last_ms)) > 4000UL)
+        return {"Brak swiezych danych"};
+      if (id(nocte_target_near)) return {"Obiekt przed panelem"};
+      if (id(display_dimmed)) return {"Ekran wygaszony"};
+      return {"Odliczanie czasu do wygaszenia"};
+
 # Wartość na WEJŚCIU template-output po korekcji gamma Tessera.
 # Nie jest to pomiar fizycznego duty ani luminancji LCD.
 sensor:
@@ -301,6 +367,82 @@ sensor:
     lambda: |-
       if (id(waveshare_pwm_from_tessera) < 0.0f) return NAN;
       return id(waveshare_pwm_from_tessera);
+
+  # Pomiar SHT30 - standardowe adresy 0x44 / 0x45 (uzywamy 0x44).
+  # Odczyty z bledami staja sie niedostepne, a nie zamrozone na starej wartosci.
+  - platform: sht3xd
+    i2c_id: touch_bus
+    address: 0x44
+    update_interval: 20s
+    temperature:
+      id: nocte_temperature
+      name: "Nocte Temperatura"
+      filters:
+        - timeout: 60s
+      on_value:
+        then:
+          - lambda: |-
+              if (std::isfinite(x)) id(nocte_sht_temp_last_ms) = millis();
+    humidity:
+      id: nocte_humidity
+      name: "Nocte Wilgotnosc"
+      filters:
+        - timeout: 60s
+      on_value:
+        then:
+          - lambda: |-
+              if (std::isfinite(x)) id(nocte_sht_humidity_last_ms) = millis();
+
+  # Wewnętrzny odczyt w metrach. Do HA trafia wynik w centymetrach ponizej.
+  # Brak celu (NaN) jest stanem normalnym; nie jest to blad komunikacji I2C.
+  - platform: vl53l0x
+    id: nocte_tof_raw
+    internal: true
+    i2c_id: touch_bus
+    address: 0x29
+    update_interval: 750ms
+    timing_budget: 33000us
+    timeout: 50ms
+    long_range: false
+    on_value:
+      then:
+        - lambda: |-
+            id(nocte_tof_sample_last_ms) = millis();
+            id(nocte_tof_distance_cm) =
+                (std::isfinite(x) && x >= 0.04f && x <= 2.0f) ? x * 100.0f : NAN;
+
+  - platform: template
+    id: nocte_distance_cm
+    name: "Nocte Odleglosc"
+    icon: mdi:ruler
+    unit_of_measurement: "cm"
+    accuracy_decimals: 0
+    state_class: measurement
+    update_interval: 1s
+    lambda: |-
+      if (!id(nocte_tof_responds).state ||
+          id(nocte_tof_sample_last_ms) == 0 ||
+          (uint32_t)(millis() - id(nocte_tof_sample_last_ms)) > 4000UL)
+        return NAN;
+      return id(nocte_tof_distance_cm);
+
+  - platform: template
+    id: nocte_time_to_off
+    name: "Nocte Czas do wygaszenia"
+    icon: mdi:timer-sand
+    unit_of_measurement: "s"
+    accuracy_decimals: 0
+    update_interval: 1s
+    lambda: |-
+      if (!id(nocte_presence_switch).state) return NAN;
+      if (id(display_dimmed)) return 0.0f;
+      if (!id(nocte_tof_responds).state ||
+          id(nocte_tof_sample_last_ms) == 0 ||
+          (uint32_t)(millis() - id(nocte_tof_sample_last_ms)) > 4000UL ||
+          id(nocte_target_near)) return NAN;
+      const uint32_t elapsed = (uint32_t)(millis() - id(last_touch_ms)) / 1000UL;
+      const float remain = id(nocte_off_delay).state - elapsed;
+      return remain > 0 ? remain : 0.0f;
 
 # Precyzyjna regulacja testowa GPIO6: omija gamma i suwak Tessera.
 # 0% zawsze fizycznie wylacza przetwornice przez BL_EN.
@@ -329,6 +471,32 @@ number:
             id(waveshare_pwm_raw).set_level(pct * 0.01f);
           }
           ESP_LOGI("bl_waveshare", "Fine PWM: %.1f%% (BL_EN %s)", pct, pct < 0.01f ? "OFF" : "ON");
+
+  - platform: template
+    id: nocte_activation_distance
+    name: "Nocte Odleglosc aktywacji"
+    icon: mdi:map-marker-distance
+    unit_of_measurement: "cm"
+    min_value: 30
+    max_value: 150
+    step: 5
+    mode: slider
+    optimistic: true
+    restore_value: true
+    initial_value: 80
+
+  - platform: template
+    id: nocte_off_delay
+    name: "Nocte Opoznienie wygaszenia"
+    icon: mdi:timer-outline
+    unit_of_measurement: "s"
+    min_value: 5
+    max_value: 300
+    step: 5
+    mode: slider
+    optimistic: true
+    restore_value: true
+    initial_value: 30
 
 # Pełny skan dostępnych adresów 7-bitowych I2C na żądanie z HA.
 # Odpowiedź w encji tekstowej "Showroom I2C wszystkie adresy".
@@ -410,3 +578,145 @@ button:
           if (count == 0) found = "Brak odpowiedzi I2C";
           ESP_LOGI("i2c_scan", "Znaleziono %u: %s", count, found.c_str());
           id(showroom_i2c_scan_result).publish_state(found);
+
+# NOCTE SHT30 + VL53L0X / automatyka dziala na ESP32-S3 bez Home Assistant.
+# Nie wykonujemy transakcji I2C w lambdach binary_sensor (wykonywanych w petli).
+# Odpytywanie I2C tylko co 10 s; brak odpowiedzi nie uruchamia petli oczekiwania.
+binary_sensor:
+  - platform: template
+    id: nocte_sht_responds
+    name: "Nocte SHT30 odpowiada"
+    icon: mdi:thermometer-check
+    entity_category: diagnostic
+
+  - platform: template
+    id: nocte_tof_responds
+    name: "Nocte VL53L0X odpowiada"
+    icon: mdi:radar
+    entity_category: diagnostic
+
+  - platform: template
+    id: nocte_sht_fresh
+    name: "Nocte SHT30 pomiary aktualne"
+    entity_category: diagnostic
+    icon: mdi:check-network
+    lambda: |-
+      const uint32_t now = millis();
+      return id(nocte_sht_responds).state &&
+             id(nocte_sht_temp_last_ms) != 0 && id(nocte_sht_humidity_last_ms) != 0 &&
+             (uint32_t)(now - id(nocte_sht_temp_last_ms)) < 60000UL &&
+             (uint32_t)(now - id(nocte_sht_humidity_last_ms)) < 60000UL;
+
+  - platform: template
+    id: nocte_tof_fresh
+    name: "Nocte VL53L0X pomiary aktualne"
+    entity_category: diagnostic
+    icon: mdi:check-network
+    lambda: |-
+      return id(nocte_tof_responds).state &&
+             id(nocte_tof_sample_last_ms) != 0 &&
+             (uint32_t)(millis() - id(nocte_tof_sample_last_ms)) <= 4000UL;
+
+  - platform: template
+    id: nocte_person_present
+    name: "Nocte Obiekt przed panelem"
+    device_class: occupancy
+    icon: mdi:account-eye
+    lambda: |-
+      if (!id(nocte_tof_fresh).state) return false;
+      return id(nocte_target_near);
+
+switch:
+  - platform: template
+    id: nocte_presence_switch
+    name: "Nocte Automatyczne wybudzanie"
+    icon: mdi:motion-sensor
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF  # nie przejmuj sterowania dopoki czujniki nie sa sprawdzone
+    turn_on_action:
+      - lambda: |-
+          if (id(nocte_target_near) && id(nocte_tof_fresh).state && id(display_dimmed)) {
+            id(nocte_auto_dimmed) = false;
+            id(wake_display).execute();
+          }
+    turn_off_action:
+      - lambda: |-
+          // Przy wylaczeniu automatyki przywroc standardowe czuwanie Tessera.
+          if (id(nocte_auto_dimmed)) {
+            id(nocte_auto_dimmed) = false;
+            id(sleep_requested) = false;
+            if (id(display_dimmed)) id(wake_display).execute();
+          }
+
+interval:
+  # Tanie sondowanie magistrali poza petla renderowania LVGL, bez retry/spin.
+  # 0xC0 = 0xEE: identyfikator modelu VL53L0X (STMicroelectronics).
+  - interval: 10s
+    then:
+      - lambda: |-
+          const auto sht_err = id(touch_bus).write_readv(0x44, nullptr, 0, nullptr, 0);
+          id(nocte_sht_responds).publish_state(sht_err == i2c::ERROR_OK);
+          uint8_t reg = 0xC0, model = 0;
+          const auto tof_err = id(touch_bus).write_readv(0x29, &reg, 1, &model, 1);
+          id(nocte_tof_responds).publish_state(tof_err == i2c::ERROR_OK && model == 0xEE);
+
+  # Histereza 20 cm i dwa kolejne pomiary spelniajace warunek (>1 s).
+  # Awaria lub brak nowych danych: zadnego automatycznego wybudzania/wygaszania.
+  # W takim przypadku Tessera zachowuje wlasne standardowe czuwanie.
+  - interval: 1s
+    then:
+      - lambda: |-
+          const uint32_t now = millis();
+          if (!id(nocte_tof_fresh).state) {
+            id(nocte_target_near) = false;
+            id(nocte_near_hits) = 0;
+            id(nocte_far_hits) = 0;
+            return;
+          }
+
+          const float cm = id(nocte_tof_distance_cm);
+          const float enter_cm = id(nocte_activation_distance).state;
+          const float leave_cm = enter_cm + 20.0f;
+          const bool in_zone = std::isfinite(cm) && cm >= 4.0f && cm <= enter_cm;
+          const bool out_zone = !std::isfinite(cm) || cm > leave_cm;
+
+          if (!id(nocte_target_near)) {
+            id(nocte_far_hits) = 0;
+            if (in_zone) {
+              if (++id(nocte_near_hits) >= 2) {
+                id(nocte_target_near) = true;
+                id(nocte_near_hits) = 0;
+                if (id(nocte_presence_switch).state) {
+                  id(last_touch_ms) = now;
+                  id(nocte_auto_dimmed) = false;
+                  if (id(display_dimmed)) id(wake_display).execute();
+                }
+              }
+            } else id(nocte_near_hits) = 0;
+          } else {
+            id(nocte_near_hits) = 0;
+            if (out_zone) {
+              if (++id(nocte_far_hits) >= 2) {
+                id(nocte_target_near) = false;
+                id(nocte_far_hits) = 0;
+              }
+            } else id(nocte_far_hits) = 0;
+          }
+
+          if (!id(nocte_presence_switch).state) return;
+          if (id(nocte_target_near)) {
+            // Nie pozwalaj wbudowanemu licznikowi Tessera wygasic ekranu
+            // gdy przed panelem ciagle jest czlowiek.
+            id(last_touch_ms) = now;
+            return;
+          }
+          // Dotkniecie ekranu rowniez resetuje last_touch_ms w kodzie Tessera.
+          if (!id(display_dimmed) &&
+              (uint32_t)(now - id(last_touch_ms)) >=
+                  (uint32_t)(id(nocte_off_delay).state * 1000.0f)) {
+            id(nocte_auto_dimmed) = true;
+            // Zabezpiecza wylaczenie nawet gdy standardowy standby Tessera
+            // zostal wylaczony; wake_display kasuje sleep_requested.
+            id(sleep_requested) = true;
+            id(dim_display).execute();
+          }
