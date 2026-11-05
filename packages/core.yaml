@@ -862,7 +862,7 @@ image:
   # The home key at the far left of the top bar (firmware 0.10.0+): the same mark as tall as the house that stood there
   # before, a house of Material Design Icons at FONT_ICON_HOME_SIZE (17 of its 24 units), about a kilobyte per board.
   - id: tessera_mark_bar
-    file: "${FONT_DIR}/nocte-mark.png"
+    file: "${FONT_DIR}/nocte-mark-v2.png"
     type: RGB565
     transparency: alpha_channel
     resize: ${ ((FONT_ICON_HOME_SIZE | int) * 17 / 24) | round | int }x${ ((FONT_ICON_HOME_SIZE | int) * 17 / 24) | round | int }
