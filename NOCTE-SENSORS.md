@@ -42,12 +42,12 @@ Uwaga: sprawdz napiecie i nazwy pinow konkretnego kupionego modulu. GPIO15/GPIO7
 - SHT30 i VL53L0X nie byly jeszcze fizycznie podlaczone do panelu; po montazu wymagany jest test rzeczywistych odczytow i poprawnosci wake/dim.
 
 ## Instalacja
-1. Zachowaj lokalne \`secrets.yaml\` i dotychczasowe klucze API/OTA/Wi-Fi.
-2. Skopiuj CALY plik \`examples/showroom.local.yaml\` jako \`/config/esphome/showroom.local.yaml\`. Nie dopisuj fragmentow na koncu starszej wersji.
-3. Glowny \`showroom.yaml\` powinien zawierac \`local_overrides: !include showroom.local.yaml\`, pakiety i komponenty z galezi \`nocte-v0.4.90\`.
+1. Zachowaj lokalne `secrets.yaml` i dotychczasowe klucze API/OTA/Wi-Fi.
+2. Skopiuj CALY plik `examples/showroom.local.yaml` jako `/config/esphome/showroom.local.yaml`. Nie dopisuj fragmentow na koncu starszej wersji.
+3. Glowny `showroom.yaml` powinien zawierac `local_overrides: !include showroom.local.yaml`, pakiety i komponenty z galezi `nocte-v0.4.90`.
 4. W ESPHome Device Builder uruchom Validate, nastepnie Install → Wirelessly. Gdy zmiany zaleznosci nie sa widoczne, uzyj Clean Build Files.
-5. Sprawdz w logach skan I2C (0x20, 0x29, 0x44, 0x48), nastepnie encje \`odpowiada\` i \`pomiary aktualne\`.
-6. Najpierw wykonaj pomiary odleglosci poza szyba oraz za szyba. Gdy wszystko dziala, wlacz \`Nocte Automatyczne wybudzanie\`.
+5. Sprawdz w logach skan I2C (0x20, 0x29, 0x44, 0x48), nastepnie encje `odpowiada` i `pomiary aktualne`.
+6. Najpierw wykonaj pomiary odleglosci poza szyba oraz za szyba. Gdy wszystko dziala, wlacz `Nocte Automatyczne wybudzanie`.
 7. Jesli wyswietlacz zle reaguje, wylacz switch, bez zmiany firmware.
 
-Uwaga: pliki w repozytorium nie zawieraja hasel ani kluczy z Twojego aktualnego panelu. Nie uruchamiaj osobno \`showroom.local.yaml\`.
+Uwaga: pliki w repozytorium nie zawieraja hasel ani kluczy z Twojego aktualnego panelu. Nie uruchamiaj osobno `showroom.local.yaml`.
