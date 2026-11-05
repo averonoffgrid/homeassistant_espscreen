@@ -1,0 +1,412 @@
+# TEST WARSZTATOWY — WAVESHARE / NOCTE
+# Baza: ostatni profil kalibracyjny (st7701s, FT6336U 0x48, BL_EN OFF przy 0%).
+# Tylko dwa parametry zmienione względem bazy:
+#   1) GPIO6 LEDC: 150Hz -> 1220Hz
+#   2) Kompensacja gamma 2.8 -> ok. 1.0 w istniejacym template output
+# Min_power pozostaje 0.0. Wszystkie diagnostyczne suwaki i przyciski zachowane.
+# WAZNE: nie zmienia sposobu inicjalizacji LCD. Kompiluj tylko showroom.yaml.
+# UWAGA: po kompensacji gamma jasnosc 5% MOZE WZROSNAC — to test, nie naprawa.
+
+# TEST PRECYZYJNY PWM GPIO6 (0.0-10.0%, krok 0.1%).
+# Potwierdzone: BL_EN poprzez PCA9554 P1 fizycznie wygasza podswietlenie.
+# W tym pliku jedyna zmiana bazowego PWM to min_power 0.01 -> 0.0.
+# Dodatkowa encja pozwala sprawdzic poziomy PWM 0-10 z krokiem 0.1%.
+# Uwaga: jest to test skalowania podswietlenia, nie docelowa krzywa.
+# Przyciskiem "Showroom PWM przywroc Tessera" przywroc zwykle sterowanie.
+
+# DIAGNOSTYKA PWM (bez ingerencji w dzialajacy LCD, dotyk i kolory).
+# TEST BL_EN potwierdzony: podswietlenie gasnie calkowicie.
+# Dodane w tym wariancie: odczyt poziomu otrzymywanego z Tessera,
+# trzy przyciski bezposredniego testu GPIO6 i przycisk przywrocenia.
+# W TYM tescie czestotliwosc to 1220Hz, min_power=0.0.
+# Mapowanie GPIO6 i polaryzacja PWM pozostaja bez zmian.
+# Skompiluj wylacznie glowny showroom.yaml, ktory includuje local.
+
+# Tessera / ESPHome 2026.9.0: Waveshare ESP32-S3-LCD-Driver-Board N8R8
+# MATRYCA ZE ZDJECIA: TL040WVS03CT-H1263A, 480x480, ST7701S, FT6336U
+# WAZNE: to PELNY plik showroom.local.yaml. Dolacz go TYLKO RAZ w showroom.yaml.
+# Zastap CALA wczesniejsza zawartosc showroom.local.yaml, nie dopisuj ponizej.
+# Waveshare: sprawdzona inwersja PWM GPIO6 + BEZPOSREDNIE BL_EN przy 0%.
+# Dotyk FT6336U pod potwierdzonym adresem I2C 0x48; odpytywanie co 30ms.
+# Sekwencja ST7701S / porch: Adafruit Qualia dla TL040WVS03 4" 480x480.
+# GPIO: Waveshare ESP32-S3-LCD-Driver-Board, 40-pin RGB.
+
+substitutions:
+  BOARD_ID: "guition" # pozostaw zgodnie z identyfikatorem utworzonego ekranu Tessera
+  PANEL_W: "480"
+  PANEL_H: "480"
+  DISPLAY_DPI: "170"
+  GRID_COLS: "2"
+  GRID_ROWS: "3"
+  SCREEN_MAX_TILES: "128"
+  SCREEN_MAX_PAGES: "24"
+  SCREEN_MAX_BAR_ITEMS: "12"
+  LVGL_BUFFER_SIZE: "25%"
+  BACKLIGHT_FREQUENCY: "1220Hz"
+
+# Korekta gamma bez redefiniowania swiatla Tessera.
+# back_light pozostaje w oryginalnym pakiecie; gamma jest kompensowana
+# dopiero na wyjsciu PWM (ponizej), bez dodatkowego light i bez !extend.
+
+esp32:
+  flash_size: 8MB
+
+logger:
+  tx_buffer_size: 2048
+  hardware_uart: UART0
+
+spi:
+  id: lcd
+  clk_pin: GPIO2
+  mosi_pin: GPIO1
+  interface: spi3
+
+i2c:
+  id: touch_bus
+  sda: GPIO15
+  scl: GPIO7
+  frequency: 100kHz  # diagnostyka, najpierw stabilne I2C
+  scan: true
+
+pca9554:
+  - id: waveshare_io
+    address: 0x20
+    i2c_id: touch_bus
+
+globals:
+  - id: waveshare_pwm_from_tessera
+    type: float
+    restore_value: no
+    initial_value: '-1.0'
+
+# Podswietlenie Waveshare: EXIO2/P1 to fizyczne EN przetwornicy LED.
+# W odroznieniu od poprzedniego power_supply, ten profil steruje EN
+# bezposrednio przy kazdej aktualizacji poziomu jasnosci z Tessera.
+# Template zachowuje ID wymagane przez Tessera: gpio_backlight_pwm.
+# PRZED WGRANIEM: sprawdz walidacje w Tessera. Wersja testowa.
+output:
+  - platform: gpio
+    id: waveshare_bl_enable
+    pin:
+      pca9554: waveshare_io
+      number: 1                 # EXIO2 / BL_EN / AP3032 EN, HIGH = wlaczone
+
+  - platform: ledc
+    id: waveshare_pwm_raw
+    pin:
+      number: GPIO6
+      inverted: true           # Zachowujemy sprawdzona regulacje jasnosci
+    frequency: ${BACKLIGHT_FREQUENCY}
+    min_power: 0.0  # Bez sztucznego minimum: test zakresu 0-10%
+    zero_means_zero: true
+
+  - platform: template
+    id: gpio_backlight_pwm     # Tego ID uzywa Tessera
+    type: float
+    write_action:
+      - lambda: |-
+          // state w zakresie 0..1 z wewnetrznego swiatla Tessera.
+          // Minimalne poziomy < 0.01% traktujemy jako OFF, na wypadek
+          // zaokraglen gamma/transition.
+          id(waveshare_pwm_from_tessera) = state * 100.0f;
+          // Pokazuje, czy suwak Tessera dociera do wyjscia PWM.
+          static int logged_bucket = -1;
+          const int bucket = static_cast<int>(state * 20.0f); // 5-procentowe przedzialy
+          if (bucket != logged_bucket) {
+            logged_bucket = bucket;
+            ESP_LOGI("bl_waveshare", "PWM z Tessera = %.3f%%", state * 100.0f);
+          }
+          // Tessera/ESPHome generuje tu poziom po domyslnej korekcji gamma 2.8.
+          // Kompensacja potegowa przywraca w przyblizeniu liniowe sterowanie (gamma 1.0)
+          // bez dotykania wspolnego 'back_light' z pakietu Tessera.
+          const float linear_level = state <= 0.0f ? 0.0f : powf(state, 1.0f / 2.8f);
+          if (state <= 0.0001f) {
+            id(waveshare_pwm_raw).set_level(0.0f);
+            id(waveshare_bl_enable).turn_off();
+            ESP_LOGD("bl_waveshare", "OFF: BL_EN=0, level=%.6f", state);
+          } else {
+            id(waveshare_pwm_raw).set_level(linear_level);
+            id(waveshare_bl_enable).turn_on();
+            ESP_LOGD("bl_waveshare", "ON: BL_EN=1, gamma_in=%.6f, pwm_out=%.6f", state, linear_level);
+          }
+
+# Dokumentacja TL040WVS03CT-H1263A: FT6336U, nie GT911!
+touchscreen:
+  - platform: ft63x6
+    id: ts_touch
+    i2c_id: touch_bus
+    address: 0x48  # POTWIERDZONE przez odczyt ID=0x40 (64)
+    display: my_display
+    # Brak interrupt_pin: test odpytywania FT6336U bez IRQ GPIO16.
+    reset_pin:
+      pca9554: waveshare_io
+      number: 0       # EXIO1, J2 pin 38 (TP_RESET)
+    update_interval: 30ms
+    on_touch:
+      - lambda: |-
+          ESP_LOGI("touch_diag", "DOTYK x=%d y=%d, raw=%d/%d", touch.x, touch.y, touch.x_raw, touch.y_raw);
+    on_release:
+      - lambda: |-
+          ESP_LOGI("touch_diag", "DOTYK zwolniony");
+    calibration:
+      x_min: 0
+      x_max: 480
+      y_min: 0
+      y_max: 480
+
+# Podswietlenie jest sterowane przez template output i BL_EN (EXIO2).
+display:
+  - platform: st7701s
+    id: my_display
+    dimensions:
+      width: 480
+      height: 480
+    spi_id: lcd
+    spi_mode: MODE3
+    data_rate: 1MHz
+    color_order: RGB
+    invert_colors: true  # specyficzna komenda ST7701S 0x21 w sekwencji Adafruit
+    cs_pin: GPIO42
+    reset_pin:
+      pca9554: waveshare_io
+      number: 2       # EXIO3, J2 pin 6 (RESET)
+    de_pin: GPIO40
+    hsync_pin: GPIO38
+    vsync_pin: GPIO39
+    pclk_pin: GPIO41
+    pclk_frequency: 16MHz
+    pclk_inverted: false
+    hsync_front_porch: 50
+    hsync_pulse_width: 2
+    hsync_back_porch: 44
+    vsync_front_porch: 16
+    vsync_pulse_width: 2
+    vsync_back_porch: 18
+    # Init dedykowany TL040WVS03, a NIE 2.8" Waveshare / GT911.
+    init_sequence:
+      - [0xFF, 0x77, 0x01, 0x00, 0x00, 0x10]
+      - [0xC0, 0x3B, 0x00]
+      - [0xC1, 0x0D, 0x02]
+      - [0xC2, 0x31, 0x05]
+      - [0xCD, 0x08]
+      - [0xB0, 0x00, 0x11, 0x18, 0x0E, 0x11, 0x06, 0x07, 0x08, 0x07, 0x22, 0x04, 0x12, 0x0F, 0xAA, 0x31, 0x18]
+      - [0xB1, 0x00, 0x11, 0x19, 0x0E, 0x12, 0x07, 0x08, 0x08, 0x08, 0x22, 0x04, 0x11, 0x11, 0xA9, 0x32, 0x18]
+      - [0xFF, 0x77, 0x01, 0x00, 0x00, 0x11]
+      - [0xB0, 0x60]
+      - [0xB1, 0x32]
+      - [0xB2, 0x07]
+      - [0xB3, 0x80]
+      - [0xB5, 0x49]
+      - [0xB7, 0x85]
+      - [0xB8, 0x21]
+      - [0xC1, 0x78]
+      - [0xC2, 0x78]
+      - [0xE0, 0x00, 0x1B, 0x02]
+      - [0xE1, 0x08, 0xA0, 0x00, 0x00, 0x07, 0xA0, 0x00, 0x00, 0x00, 0x44, 0x44]
+      - [0xE2, 0x11, 0x11, 0x44, 0x44, 0xED, 0xA0, 0x00, 0x00, 0xEC, 0xA0, 0x00, 0x00]
+      - [0xE3, 0x00, 0x00, 0x11, 0x11]
+      - [0xE4, 0x44, 0x44]
+      - [0xE5, 0x0A, 0xE9, 0xD8, 0xA0, 0x0C, 0xEB, 0xD8, 0xA0, 0x0E, 0xED, 0xD8, 0xA0, 0x10, 0xEF, 0xD8, 0xA0]
+      - [0xE6, 0x00, 0x00, 0x11, 0x11]
+      - [0xE7, 0x44, 0x44]
+      - [0xE8, 0x09, 0xE8, 0xD8, 0xA0, 0x0B, 0xEA, 0xD8, 0xA0, 0x0D, 0xEC, 0xD8, 0xA0, 0x0F, 0xEE, 0xD8, 0xA0]
+      - [0xEB, 0x02, 0x00, 0xE4, 0xE4, 0x88, 0x00, 0x40]
+      - [0xEC, 0x3C, 0x00]
+      - [0xED, 0xAB, 0x89, 0x76, 0x54, 0x02, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x20, 0x45, 0x67, 0x98, 0xBA]
+      - [0x36, 0x00]
+      - [0xFF, 0x77, 0x01, 0x00, 0x00, 0x13]
+      - [0xE5, 0xE4]
+      - [0xFF, 0x77, 0x01, 0x00, 0x00, 0x00]
+      - [0x3A, 0x66]
+      - [0x21]
+      - delay 10ms
+      - [0x11]
+      - delay 120ms
+      - [0x29]
+    # PHY Waveshare: 16-bit RGB565. Matryca obsluguje 18-bit RGB666,
+    # ale Waveshare nie podlacza najmniej znaczacych B0 i R0.
+    data_pins:
+      red: [46, 3, 8, 18, 17]
+      green: [14, 13, 12, 11, 10, 9]
+      blue: [5, 45, 48, 47, 21]
+    update_interval: never
+    auto_clear_enabled: false
+
+# Diagnostyka dostepna nawet po uruchomieniu sieci Wi-Fi.
+# Bez nowych identyfikatorow sprzetowych - brak konfliktow z Tessera.
+# Te dwie encje pojawia sie w Home Assistant po wgraniu firmware.
+text_sensor:
+  - platform: template
+    id: showroom_i2c_scan_result
+    name: "Showroom I2C wszystkie adresy"
+    entity_category: diagnostic
+    icon: mdi:magnify-scan
+    update_interval: never
+
+  - platform: template
+    id: waveshare_touch_i2c_status
+    name: "Showroom FT6336U I2C"
+    entity_category: diagnostic
+    icon: mdi:gesture-tap
+    update_interval: 15s
+    lambda: |-
+      // Diagnostyka FT6336U: standardowy 0x38 i alternatywny 0x48.
+      // Sterownik dotyku ma adres 0x48; dodatkowo sprawdzamy oba adresy diagnostycznie.
+      uint8_t reg = 0xA3;
+      uint8_t chip38 = 0;
+      uint8_t chip48 = 0;
+      auto err38 = id(touch_bus).write_readv(0x38, &reg, 1, &chip38, 1);
+      auto err48 = id(touch_bus).write_readv(0x48, &reg, 1, &chip48, 1);
+      ESP_LOGI("touch_diag", "Probe FT63x6: 0x38=%d ID=0x%02X; 0x48=%d ID=0x%02X",
+               (int)err38, chip38, (int)err48, chip48);
+      char buf[95];
+      if (err38 == i2c::ERROR_OK && err48 == i2c::ERROR_OK) {
+        snprintf(buf, sizeof(buf), "0x38 OK ID=%02X; 0x48 OK ID=%02X", chip38, chip48);
+      } else if (err38 == i2c::ERROR_OK) {
+        snprintf(buf, sizeof(buf), "0x38 OK ID=%02X; 0x48 brak (%d)", chip38, (int)err48);
+      } else if (err48 == i2c::ERROR_OK) {
+        snprintf(buf, sizeof(buf), "0x38 brak (%d); 0x48 OK ID=%02X", (int)err38, chip48);
+      } else {
+        snprintf(buf, sizeof(buf), "0x38 brak (%d); 0x48 brak (%d)", (int)err38, (int)err48);
+      }
+      return {std::string(buf)};
+  - platform: template
+    id: waveshare_expander_i2c_status
+    name: "Showroom PCA9554 I2C"
+    entity_category: diagnostic
+    icon: mdi:chip
+    update_interval: 30s
+    lambda: |-
+      uint8_t reg = 0x00;  // PCA9554: rejestr wejsc, tylko odczyt
+      uint8_t value = 0;
+      const auto err = id(touch_bus).write_readv(0x20, &reg, 1, &value, 1);
+      if (err != i2c::ERROR_OK) {
+        ESP_LOGW("touch_diag", "PCA9554 0x20: brak odpowiedzi I2C, blad=%d", (int) err);
+        return {"Brak odpowiedzi 0x20 (blad " + std::to_string((int) err) + ")"};
+      }
+      ESP_LOGI("touch_diag", "PCA9554 0x20: odpowiedz I2C");
+      return {"OK 0x20"};
+
+# Wartość na WEJŚCIU template-output po korekcji gamma Tessera.
+# Nie jest to pomiar fizycznego duty ani luminancji LCD.
+sensor:
+  - platform: template
+    id: waveshare_pwm_from_tessera_sensor
+    name: "Showroom PWM otrzymane z Tessera"
+    entity_category: diagnostic
+    icon: mdi:brightness-percent
+    unit_of_measurement: "%"
+    accuracy_decimals: 2
+    update_interval: 1s
+    lambda: |-
+      if (id(waveshare_pwm_from_tessera) < 0.0f) return NAN;
+      return id(waveshare_pwm_from_tessera);
+
+# Precyzyjna regulacja testowa GPIO6: omija gamma i suwak Tessera.
+# 0% zawsze fizycznie wylacza przetwornice przez BL_EN.
+number:
+  - platform: template
+    id: waveshare_pwm_fine_test
+    name: "Showroom TEST precyzyjny PWM GPIO6"
+    entity_category: diagnostic
+    icon: mdi:brightness-6
+    unit_of_measurement: "%"
+    min_value: 0
+    max_value: 10
+    step: 0.1
+    mode: slider
+    optimistic: true
+    restore_value: false
+    initial_value: 5
+    set_action:
+      - lambda: |-
+          const float pct = std::max(0.0f, std::min(10.0f, (float)x));
+          if (pct < 0.01f) {
+            id(waveshare_pwm_raw).set_level(0.0f);
+            id(waveshare_bl_enable).turn_off();
+          } else {
+            id(waveshare_bl_enable).turn_on();
+            id(waveshare_pwm_raw).set_level(pct * 0.01f);
+          }
+          ESP_LOGI("bl_waveshare", "Fine PWM: %.1f%% (BL_EN %s)", pct, pct < 0.01f ? "OFF" : "ON");
+
+# Pełny skan dostępnych adresów 7-bitowych I2C na żądanie z HA.
+# Odpowiedź w encji tekstowej "Showroom I2C wszystkie adresy".
+# Test fizycznego BL_EN: uruchamiaj przy jasnosci ok. 50%.
+# W trakcie testu ekran zgasnie na 3 sekundy.
+button:
+  # Testy omijaja suwak Tessera. Nie testowac przy 0% jasnosci, gdyz
+  # poziomy 10/50/90% ustawiaja GPIO6 bezposrednio i trzymaja BL_EN=ON.
+  - platform: template
+    id: waveshare_pwm_test_10
+    name: "Showroom TEST GPIO6 PWM 10%"
+    entity_category: diagnostic
+    on_press:
+      - lambda: |-
+          id(waveshare_bl_enable).turn_on();
+          id(waveshare_pwm_raw).set_level(0.10f);
+          ESP_LOGI("bl_waveshare", "TEST bezposredni GPIO6 PWM=10%%");
+
+  - platform: template
+    id: waveshare_pwm_test_50
+    name: "Showroom TEST GPIO6 PWM 50%"
+    entity_category: diagnostic
+    on_press:
+      - lambda: |-
+          id(waveshare_bl_enable).turn_on();
+          id(waveshare_pwm_raw).set_level(0.50f);
+          ESP_LOGI("bl_waveshare", "TEST bezposredni GPIO6 PWM=50%%");
+
+  - platform: template
+    id: waveshare_pwm_test_90
+    name: "Showroom TEST GPIO6 PWM 90%"
+    entity_category: diagnostic
+    on_press:
+      - lambda: |-
+          id(waveshare_bl_enable).turn_on();
+          id(waveshare_pwm_raw).set_level(0.90f);
+          ESP_LOGI("bl_waveshare", "TEST bezposredni GPIO6 PWM=90%%");
+
+  - platform: template
+    id: waveshare_pwm_restore
+    name: "Showroom PWM przywroc Tessera"
+    entity_category: diagnostic
+    on_press:
+      - lambda: |-
+          // Zrodlo tej formuly: OTA_BACKLIGHT w features/backlight.yaml Tessera.
+          const float v = screen_settings::current.brightness / 100.0f;
+          id(gpio_backlight_pwm).set_level(powf(v, id(back_light)->get_gamma_correct()));
+          ESP_LOGI("bl_waveshare", "Przywrocono PWM ze stanu normal brightness=%d%%",
+                   (int)screen_settings::current.brightness);
+
+  - platform: template
+    id: waveshare_bl_en_test
+    name: "Showroom TEST BL_EN 3s"
+    entity_category: diagnostic
+    on_press:
+      - output.turn_off: waveshare_bl_enable
+      - delay: 3s
+      - output.turn_on: waveshare_bl_enable
+
+  - platform: template
+    id: showroom_i2c_scan_button
+    name: "Showroom Skanuj I2C"
+    entity_category: diagnostic
+    icon: mdi:magnify-scan
+    on_press:
+      - lambda: |-
+          std::string found;
+          unsigned int count = 0;
+          for (uint8_t addr = 0x08; addr <= 0x77; ++addr) {
+            const auto err = id(touch_bus).write_readv(addr, nullptr, 0, nullptr, 0);
+            if (err == i2c::ERROR_OK) {
+              char hex[8];
+              snprintf(hex, sizeof(hex), "0x%02X ", addr);
+              found += hex;
+              ++count;
+              ESP_LOGI("i2c_scan", "ACK: 0x%02X", addr);
+            }
+          }
+          if (count == 0) found = "Brak odpowiedzi I2C";
+          ESP_LOGI("i2c_scan", "Znaleziono %u: %s", count, found.c_str());
+          id(showroom_i2c_scan_result).publish_state(found);
