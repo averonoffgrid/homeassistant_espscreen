@@ -1,0 +1,53 @@
+# Nocte Showroom / ESPHome - public template (NO credentials)
+# Copy to /config/esphome/showroom.yaml and keep your credentials in local secrets.yaml.
+substitutions:
+  DEVICE_NAME: "showroom"
+  DEVICE_FRIENDLY_NAME: "Showroom"
+  LANGUAGE: "pl"
+  GITHUB_REF: "nocte-v0.4.90"
+  FONT_DIR: "https://raw.githubusercontent.com/averonoffgrid/homeassistant_espscreen/${GITHUB_REF}/fonts"
+
+esphome:
+  name: "showroom"
+  friendly_name: "Showroom"
+
+packages:
+  tessera:
+    url: https://github.com/averonoffgrid/homeassistant_espscreen
+    ref: nocte-v0.4.90
+    files:
+      - packages/core.yaml
+      - packages/hardware/esp32s3-rgb.yaml
+      - packages/looks/standard.yaml
+      - packages/features/capacitive-touch.yaml
+      - packages/features/backlight.yaml
+      - packages/features/camera.yaml
+      - packages/features/self-test.yaml
+      - packages/features/snapshot.yaml
+      - packages/features/hotspot.yaml
+    refresh: 0s
+  local_overrides: !include showroom.local.yaml
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/averonoffgrid/homeassistant_espscreen.git
+      ref: nocte-v0.4.90
+      path: components
+    refresh: 0s
+    components: [smart_display]
+
+api:
+  encryption:
+    key: !secret showroom_api_key
+ota:
+  - platform: esphome
+    password: !secret showroom_ota_password
+wifi:
+  ssid: "ZARZECKA"
+  password: !secret wifi_password
+  power_save_mode: none
+  ap:
+    ssid: "Nocte Showroom"
+    password: !secret showroom_ap_password
+captive_portal:
