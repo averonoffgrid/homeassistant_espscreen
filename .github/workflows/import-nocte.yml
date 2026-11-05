@@ -1,0 +1,43 @@
+name: Import Tessera firmware sources for Nocte
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/import-nocte.yml]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Nocte branch
+        uses: actions/checkout@v4
+        with:
+          ref: nocte-v0.4.90
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Import pinned upstream source (preserve working split refs)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch screens-v0.4.90 https://github.com/MaxGramser/homeassistant_espscreen.git /tmp/tessera-pkg
+          git clone --depth 1 --branch screens-v0.4.89 https://github.com/MaxGramser/homeassistant_espscreen.git /tmp/tessera-components
+          mkdir -p packages components fonts screen_manager/translations
+          cp -a /tmp/tessera-pkg/packages/. packages/
+          cp -a /tmp/tessera-components/components/. components/
+          cp -a /tmp/tessera-pkg/fonts/. fonts/
+          cp /tmp/tessera-components/screen_manager/translations/en.json screen_manager/translations/en.json
+          cp /tmp/tessera-components/screen_manager/translations/pl.json screen_manager/translations/pl.json
+          python3 -m pip install -q cairosvg
+          python3 - <<'PY'
+          import cairosvg
+          cairosvg.svg2png(url='fonts/nocte-mark.svg', write_to='fonts/nocte-mark.png')
+          cairosvg.svg2png(url='fonts/nocte-wordmark.svg', write_to='fonts/nocte-wordmark.png')
+          PY
+          git config user.name "Nocte firmware import"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add LICENSE packages components fonts screen_manager/translations
+          if ! git diff --cached --quiet; then
+            git commit -m "vendor: upstream Tessera packages 0.4.90 and components 0.4.89; Nocte assets"
+            git push origin HEAD:nocte-v0.4.90
+          fi
