@@ -859,8 +859,8 @@ image:
     type: RGB565
     transparency: alpha_channel
     resize: 260x108
-  # The home key at the far left of the top bar (firmware 0.10.0+): the same mark as tall as the house that stood there
-  # before, a house of Material Design Icons at FONT_ICON_HOME_SIZE (17 of its 24 units), about a kilobyte per board.
+  # Nocte mark at the far left of the top bar, resized to 90% of FONT_ICON_HOME_SIZE.
+  # Replaces the original Material Design home icon (previously sized to 17/24 of FONT_ICON_HOME_SIZE).
   - id: tessera_mark_bar
     file: "${FONT_DIR}/nocte-mark-v2.png"
     type: RGB565
