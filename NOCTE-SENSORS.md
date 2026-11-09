@@ -16,8 +16,8 @@ Uwaga: sprawdz napiecie i nazwy pinow konkretnego kupionego modulu. GPIO15/GPIO7
 - Nocte Temperatura, Nocte Wilgotnosc
 - Nocte Odleglosc (cm), Nocte Strefa odleglosci, Nocte Obiekt przed panelem
 - Nocte Tryb ekranu: Wake / Sleep / OFF / Tessera
-- Nocte Czas do wygaszenia: licznik po opuszczeniu Wake (rowniez w Sleep) lub po opuszczeniu Sleep poza D2; 0 po OFF, unavailable bez aktywnego licznika
-- Nocte Automatyczne wybudzanie: switch z pamiecia stanu, przy pierwszym uruchomieniu OFF
+- Nocte Czas do wygaszenia: odliczanie tylko poza Odlegloscia 2; 0 po OFF, unavailable w Wake i Sleep bez licznika
+- Nocte Automatyczne wybudzanie: switch, przy pierwszym uruchomieniu OFF
 - Nocte Odleglosc 1: 20–150 cm, domyslnie 80 cm
 - Nocte Odleglosc 2: 30–200 cm, domyslnie 140 cm
 - Nocte Opoznienie wygaszenia: 5–300 s, domyslnie 30 s
@@ -26,19 +26,19 @@ Uwaga: sprawdz napiecie i nazwy pinow konkretnego kupionego modulu. GPIO15/GPIO7
 - Nocte Stan automatyki: szczegolowy tekst diagnostyczny
 
 ## Zasada dzialania (3 strefy)
-1. 0 do **Odleglosc 1**: **Wake**, pelna ustawiona jasnosc, licznik OFF wyzerowany.
-2. Przekroczenie **Odleglosc 1** (rowniez skok bezposrednio za D2): przejscie na **Sleep** i **natychmiastowy start odliczania OFF**. Nawet pozostanie w strefie Sleep przez caly ustawiony czas spowoduje OFF.
-3. Przebywanie w strefie **Odleglosc 1..Odleglosc 2**: **Sleep** na ustawionej jasnosci czuwania Tessera. Po zakonczeniu licznika uruchomionego przez wyjscie z Wake: **OFF** (BL_EN=0). Jesli panel uruchomil sie od razu w tej strefie bez poprzedniego Wake, nie ma jeszcze uruchomionego licznika.
-4. Opuszczenie **Sleep** dalej niz **Odleglosc 2**: rozpoczyna odliczanie, jesli nie trwa juz od poprzedniego wyjscia z Wake. Przejscie Sleep -> poza D2 **nie zeruje** zegara uruchomionego przy opuszczeniu Wake.
-5. Przy pierwszym odczycie bez osoby w zasiegu (> D2) uruchamia sie odliczanie, a po czasie OFF. **OFF** to PWM=0 i fizyczne BL_EN=0.
-6. Ponowne wejscie do **Wake** zawsze zeruje zegar i wybudza panel. Powrot **z daleka do Sleep po OFF** przywraca Sleep i kasuje poprzedni licznik. Przy pozostawaniu bez ruchu w Sleep po automatycznym OFF panel pozostaje OFF (brak cyklicznego rozjasniania).
-7. Dwa kolejne cykle pomiarowe (co 1 s) potwierdzaja przejscie do innej strefy. Przy braku obiektu przy dzialajacym sensorze dystansu stan jest traktowany jako > D2.
-8. Przy niespojnym ustawieniu progow firmware przyjmuje efektywna **Odleglosc 2 >= Odleglosc 1 + 10 cm**. Dla czytelnosci ustaw D2 o co najmniej 10 cm wiecej niz D1 w HA.
-9. Dotkniecie ekranu w Sleep lub OFF wybudza panel na co najmniej 10 s. Kazdy dotyk resetuje licznik OFF, niezaleznie od strefy; po ochronie ekran wraca do Sleep, a potem OFF zgodnie z licznikiem.
-10. Oryginalna automatyka Tessera pozostaje dostepna po wylaczeniu przelacznika "Nocte Automatyczne wybudzanie".
-11. Tryb OFF jest uwzgledniony w `APPLY_BACKLIGHT`, aby minutowa aktualizacja ustawien Tessera nie wlaczyla ponownie podswietlenia.
+1. Dystans **do Odleglosci 1 (D1)**: tryb Wake, normalna jasnosc; wyzerowany licznik OFF.
+2. Dystans **powyzej D1 do Odleglosci 2 (D2)**: tryb Sleep, podswietlenie na stale na poziomie czuwania Tessera; w tej strefie **OFF NIE jest odliczany i NIE wlacza sie samoczynnie**.
+3. Dystans **powyzej D2**: tryb Sleep oraz start licznika "Nocte Opoznienie wygaszenia". Po uplywie czasu fizyczny OFF (PWM=0, BL_EN=0).
+4. Bezposredni skok pomiaru z Wake za D2 (bez zarejestrowania strefy Sleep) rowniez rozpoczyna odliczanie do OFF.
+5. Powrot z OFF do strefy Sleep wlacza przyciemnione podswietlenie. Powrot z OFF/Sleep do Wake wlacza normalna jasnosc. Samo pozostawanie poza D2 utrzymuje OFF, bez cyklicznego swiecenia.
+6. Przejscie ze strefy dalekiej do Sleep lub Wake zawsze anuluje licznik OFF; nastepne wyjscie poza D2 zaczyna pelne opoznienie od nowa.
+7. Dwa kolejne cykle sprawdzajace (co 1 s) zatwierdzaja zmiane strefy. Brak obiektu w zasiegu przy dzialajacym czujniku traktowany jest jako >D2.
+8. Przy niespojnych nastawach efektywny prog D2 wynosi co najmniej D1+10 cm. Ustawiaj D2 o >=10 cm wiecej niz D1.
+9. Dotyk/rekord Wake z Home Assistant chwilowo wybudza ekran z Sleep/OFF (10 s ochrony). Po zakonczeniu ochrony w strefie dalekiej zaczyna sie pelne opoznienie OFF.
+10. Wylaczenie switcha "Nocte Automatyczne wybudzanie" oddaje sterowanie oryginalnej logice Tessera.
+11. Tryb OFF jest uwzgledniony w `APPLY_BACKLIGHT` — odswiezanie ustawien Tessera nie wlacza podswietlenia przypadkowo.
 
-**Wazne:** aby rozroznic Sleep i OFF, w ustawieniach Tessera ustaw **Standby brightness** na wartosc wyzsza od 0% (np. 20%). Sleep korzysta z tej wartosci (ewentualnie nocnej jasnosci czuwania), OFF wymusza 0% niezaleznie od niej.
+**Wazne:** aby Sleep byl rzeczywiscie widoczny, ustaw w Tessera **Standby brightness >0%**, np. 20% (sprawdz tez ustawienie jasnosci nocnej). OFF wymusza 0% i fizyczne wykluczenie BL_EN.
 
 ## Odporność na awarie
 - Timeout magistrali I2C wynosi 10 ms (ESP-IDF).
@@ -54,6 +54,12 @@ Uwaga: sprawdz napiecie i nazwy pinow konkretnego kupionego modulu. GPIO15/GPIO7
 4. W ESPHome Device Builder uruchom Validate, nastepnie Install → Wirelessly. Gdy zmiany zaleznosci nie sa widoczne, uzyj Clean Build Files.
 5. Sprawdz w logach skan I2C (0x20, 0x29, 0x44, 0x48), nastepnie encje `odpowiada` i `pomiary aktualne`.
 6. Po poprawnym dzialaniu sensorow ustaw progi D1/D2 i opoznienie. W Tessera ustaw widoczna jasnosc czuwania, np. Standby brightness = 20%. Potem wlacz `Nocte Automatyczne wybudzanie`.
-7. Test A: 50 cm = Wake, przejdz na 100 cm i pozostan tam (D1=80, D2=140, opoznienie=30 s): Sleep, potem OFF po ~30 s mimo przebywania w Sleep. Test B: 50 cm = Wake, przejdz bezposrednio na 170 cm: Sleep i OFF po ~30 s. Test C: po ponownym Wake przejdz na 100 cm, potem 170 cm przed uplywem 30 s: licznik ma zachowac czas od pierwszego opuszczenia Wake. Test D: z OFF wejdź z daleka do Sleep, a nastepnie do Wake. Sprawdz tez reczne wybudzenie dotykiem. Jesli ekran zle reaguje, wylacz switch.
+7. Przy D1=80 cm, D2=140 cm, opoznienie=5 s wykonaj:
+   - Test A: 50 -> 91 cm: Wake -> Sleep; poczekaj 15 s, ekran MA pozostac przyciemniony (bez OFF).
+   - Test B: 91 -> 170 cm: Sleep -> licznik 5 s -> OFF.
+   - Test C: 50 -> 170 cm w jednym kroku pomiaru: Wake -> licznik 5 s -> OFF.
+   - Test D: po OFF wroc na 91 cm: ekran MA natychmiast przywrocic Sleep; nastepnie zejdz na 50 cm: Wake.
+   - Test E: sprawdz dotyk i reczne Wake; przelacznik OFF automatyki powinien przywrocic zwykle dzialanie Tessera.
+
 
 Uwaga: pliki w repozytorium nie zawieraja hasel ani kluczy z Twojego aktualnego panelu. Nie uruchamiaj osobno `showroom.local.yaml`.
