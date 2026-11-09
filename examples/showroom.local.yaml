@@ -720,6 +720,15 @@ interval:
       - lambda: |-
           const uint32_t now = millis();
           if (!id(nocte_tof_fresh).state) {
+            // Fail-safe: uwolnij wymuszone OFF, aby dotyk i Tessera mogly budzic ekran.
+            // Nie powtarzaj akcji I2C ani skryptow w petli przy awarii.
+            if (id(nocte_screen_mode) != 0) {
+              id(nocte_screen_mode) = 0;
+              id(nocte_auto_dimmed) = false;
+              id(sleep_requested) = false;
+              id(apply_screen_settings).execute();
+              ESP_LOGW("nocte", "Brak swiezego VL53L0X - oddanie podswietlenia Tessera");
+            }
             id(nocte_target_zone) = 0;
             id(nocte_candidate_zone) = 0;
             id(nocte_candidate_count) = 0;
