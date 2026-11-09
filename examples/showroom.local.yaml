@@ -752,11 +752,9 @@ interval:
           } else if (id(nocte_candidate_count) < 2) {
             ++id(nocte_candidate_count);
           }
-          bool zone_changed = false;
           if (id(nocte_candidate_count) >= 2 && id(nocte_target_zone) != candidate) {
             const int previous_zone = id(nocte_target_zone);
             id(nocte_target_zone) = candidate;
-            zone_changed = true;
             id(nocte_manual_grace_until_ms) = 0;
             if (candidate == 3) {
               // Opuszczenie Wake bezposrednio poza D2, opuszczenie Sleep
