@@ -15,31 +15,35 @@ Uwaga: sprawdz napiecie i nazwy pinow konkretnego kupionego modulu. GPIO15/GPIO7
 ## Encje w HA
 - Nocte Temperatura, Nocte Wilgotnosc
 - Nocte Odleglosc (cm), Nocte Strefa odleglosci, Nocte Obiekt przed panelem
-- Nocte Czas do wygaszenia (sekundy; unavailable gdy automat wylaczony, brak pomiaru lub osoba jest obecna; 0 przy wygaszonym ekranie)
-- Nocte Automatyczne wybudzanie (switch; pierwszy start OFF, po uruchomieniu mozna wlaczyc)
-- Nocte Odleglosc aktywacji (30–150 cm, domyslnie 80 cm)
-- Nocte Opoznienie wygaszenia (5–300 s, domyslnie 30 s)
-- Nocte SHT30 odpowiada, Nocte VL53L0X odpowiada — komunikacja I2C
-- Nocte SHT30 pomiary aktualne, Nocte VL53L0X pomiary aktualne — swieze dane
-- Nocte Stan automatyki — tekstowy status
+- Nocte Tryb ekranu: Wake / Sleep / OFF / Tessera
+- Nocte Czas do wygaszenia: odliczanie tylko po wyjsciu poza Odleglosc 2; 0 po OFF, unavailable w innych strefach
+- Nocte Automatyczne wybudzanie: switch z pamiecia stanu, przy pierwszym uruchomieniu OFF
+- Nocte Odleglosc 1: 20–150 cm, domyslnie 80 cm
+- Nocte Odleglosc 2: 30–200 cm, domyslnie 140 cm
+- Nocte Opoznienie wygaszenia: 5–300 s, domyslnie 30 s
+- Nocte SHT30 odpowiada, Nocte VL53L0X odpowiada: komunikacja I2C
+- Nocte SHT30 pomiary aktualne, Nocte VL53L0X pomiary aktualne: swieze dane
+- Nocte Stan automatyki: szczegolowy tekst diagnostyczny
 
-## Zasada dzialania
-- Odczyt VL53L0X co 750 ms; SHT30 co 20 s; sondowanie sprzetu na I2C co 10 s.
-- Dwa kolejne cykle z odlegloscia <= progu wlaczaja stan "obiekt przed panelem".
-- Stan aktywny trwa az do dwoch cykli poza progiem +20 cm (histereza).
-- Po pojawieniu sie obiektu wywolany jest istniejacy skrypt Tessera wake_display.
-- Podczas obecnosci odswiezamy standardowy zegar standby Tessera; dotyk ekranu takze odswieza ten zegar.
-- Po zaniku obiektu odliczamy ustawione opoznienie i wywolujemy dim_display. Dodatkowo ustawiamy sleep_requested, zeby minutowe odswiezanie Tessera nie wlaczylo przypadkowo swiatla przy wylaczonym standardowym Auto Standby.
-- Wylaczenie przelacznika automatyki przywraca logike standardowej Tessera; ekran automatycznie wygaszony wczesniej przez nowy mechanizm zostaje wybudzony.
-- Niewazna odleglosc (NaN) przy prawidlowej komunikacji oznacza "poza zasiegiem" i pozwala rozpoczac odliczanie.
-- Brak komunikacji lub brak nowych probek w ciagu 4 s powoduje wylaczenie sterowania nowa automatyka (fail-safe). Dotychczasowy mechanizm standby Tessera pozostaje niezalezny.
+## Zasada dzialania (3 strefy)
+1. 0 do **Odleglosc 1**: **Wake**, ekran na normalnej jasnosci.
+2. Od **Odleglosc 1** do **Odleglosc 2**: **Sleep**, podswietlenie ustawione na poziom czuwania Tessera.
+3. Za **Odleglosc 2**: ekran jest w **Sleep** i rozpoczyna sie odliczanie **Nocte Opoznienie wygaszenia**. Po odliczeniu: **OFF**, sterowanie PWM=0 oraz fizyczne BL_EN=0.
+4. Powrot z OFF do strefy 2 przywraca podswietlenie Sleep, a powrot do strefy 1 wykonuje Wake.
+5. Dwa kolejne cykle pomiarowe (co 1 s) potwierdzaja przejscie do innej strefy. Przy braku obiektu przy dzialajacym sensorze dystansu stan jest traktowany jako odleglosc > prog 2.
+6. Przy niespojnym ustawieniu progow firmware przyjmuje efektywna **Odleglosc 2 >= Odleglosc 1 + 10 cm**. Dla czytelnosci ustaw D2 o co najmniej 10 cm wiecej niz D1 w HA.
+7. Dotkniecie ekranu w Sleep lub OFF wybudza panel na co najmniej 10 s (przedluzenie przy kolejnych dotknieciach). W strefie dalekiej licznik OFF jest wtedy resetowany.
+8. Oryginalna automatyka Tessera pozostaje dostepna po wylaczeniu przelacznika "Nocte Automatyczne wybudzanie".
+9. Tryb OFF jest uwzgledniony w `APPLY_BACKLIGHT`, aby minutowa aktualizacja ustawien Tessera nie wlaczyla ponownie podswietlenia.
+
+**Wazne:** aby rozroznic Sleep i OFF, w ustawieniach Tessera ustaw **Standby brightness** na wartosc wyzsza od 0% (np. 20%). Sleep korzysta z tej wartosci (ewentualnie nocnej jasnosci czuwania), OFF wymusza 0% niezaleznie od niej.
 
 ## Odporność na awarie
 - Timeout magistrali I2C wynosi 10 ms (ESP-IDF).
 - Odczyty i proby diagnostyczne nie sa wykonywane w ciasnych petlach ani z nieograniczonym ponawianiem.
 - Brak czujnika nie powinien blokowac logiki ekranu; encje diagnostyczne pokazuja przyczyne.
 - Awaria fizyczna wspolnej magistrali (np. zwarcie SDA/SCL, nieprawidlowe zasilanie lub duze zaklocenia) moze wplynac rowniez na FT6336U i PCA9554. Sam firmware nie gwarantuje dzialania tych urzadzen przy uszkodzonym okablowaniu. W razie potrzeby zastosuj izolacje/oddzielna magistrale.
-- SHT30 i VL53L0X nie byly jeszcze fizycznie podlaczone do panelu; po montazu wymagany jest test rzeczywistych odczytow i poprawnosci wake/dim.
+- Uzytkownik potwierdzil poprawne odczyty SHT30 i VL53L0X. Trzystopniowa logika Wake/Sleep/OFF jest nowa i wymaga walidacji kompilacji oraz testu na panelu.
 
 ## Instalacja
 1. Zachowaj lokalne `secrets.yaml` i dotychczasowe klucze API/OTA/Wi-Fi.
@@ -47,7 +51,7 @@ Uwaga: sprawdz napiecie i nazwy pinow konkretnego kupionego modulu. GPIO15/GPIO7
 3. Glowny `showroom.yaml` powinien zawierac `local_overrides: !include showroom.local.yaml`, pakiety i komponenty z galezi `nocte-v0.4.90`.
 4. W ESPHome Device Builder uruchom Validate, nastepnie Install → Wirelessly. Gdy zmiany zaleznosci nie sa widoczne, uzyj Clean Build Files.
 5. Sprawdz w logach skan I2C (0x20, 0x29, 0x44, 0x48), nastepnie encje `odpowiada` i `pomiary aktualne`.
-6. Najpierw wykonaj pomiary odleglosci poza szyba oraz za szyba. Gdy wszystko dziala, wlacz `Nocte Automatyczne wybudzanie`.
-7. Jesli wyswietlacz zle reaguje, wylacz switch, bez zmiany firmware.
+6. Po poprawnym dzialaniu sensorow ustaw progi D1/D2 i opoznienie. W Tessera ustaw widoczna jasnosc czuwania, np. Standby brightness = 20%. Potem wlacz `Nocte Automatyczne wybudzanie`.
+7. Test: 50 cm = Wake; 100 cm = Sleep; 170 cm = Sleep, potem OFF po 30 s (przy D1=80 cm, D2=140 cm). Dotknij ekran w trybie OFF i sprawdz reczne wybudzenie. Jesli ekran zle reaguje, wylacz switch.
 
 Uwaga: pliki w repozytorium nie zawieraja hasel ani kluczy z Twojego aktualnego panelu. Nie uruchamiaj osobno `showroom.local.yaml`.
