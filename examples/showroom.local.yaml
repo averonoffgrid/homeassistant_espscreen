@@ -43,6 +43,14 @@ substitutions:
   SCREEN_MAX_BAR_ITEMS: "12"
   LVGL_BUFFER_SIZE: "25%"
   BACKLIGHT_FREQUENCY: "1220Hz"
+  # Lokalny override: Nocte OFF musi utrzymac 0% takze po odswiezeniu Tessera.
+  # Sleep korzysta ze standardowej jasnosci czuwania ustawionej w Tessera.
+  APPLY_BACKLIGHT: |-
+    const bool nocte_forced_off = id(nocte_presence_switch).state &&
+                                  id(nocte_screen_mode) == 3 &&
+                                  !id(alert_active) && !id(calibration_active);
+    id(set_backlight).execute(nocte_forced_off ? 0 : level,
+                              id(display_dimmed) ? 1500 : 200);
 
 # Korekta gamma bez redefiniowania swiatla Tessera.
 # back_light pozostaje w oryginalnym pakiecie; gamma jest kompensowana
@@ -99,12 +107,30 @@ globals:
     type: bool
     restore_value: no
     initial_value: 'false'
-  - id: nocte_near_hits
+  # Strefa: 0=brak odczytu, 1=Wake, 2=Sleep, 3=poza drugim progiem.
+  - id: nocte_target_zone
     type: int
     restore_value: no
     initial_value: '0'
-  - id: nocte_far_hits
+  - id: nocte_candidate_zone
     type: int
+    restore_value: no
+    initial_value: '0'
+  - id: nocte_candidate_count
+    type: int
+    restore_value: no
+    initial_value: '0'
+  # Tryb wymuszony: 0=Tessera, 1=Wake, 2=Sleep, 3=OFF.
+  - id: nocte_screen_mode
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: nocte_far_since_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: nocte_manual_grace_until_ms
+    type: uint32_t
     restore_value: no
     initial_value: '0'
   - id: nocte_auto_dimmed
@@ -326,16 +352,26 @@ text_sensor:
     icon: mdi:map-marker-distance
     update_interval: 1s
     lambda: |-
-      const uint32_t now = millis();
       if (!id(nocte_tof_responds).state) return {"Brak komunikacji I2C"};
       if (id(nocte_tof_sample_last_ms) == 0 ||
-          (uint32_t)(now - id(nocte_tof_sample_last_ms)) > 4000UL)
+          (uint32_t)(millis() - id(nocte_tof_sample_last_ms)) > 4000UL)
         return {"Brak nowych odczytow"};
-      const float cm = id(nocte_tof_distance_cm);
-      if (!std::isfinite(cm)) return {"Poza zasiegiem"};
-      if (cm <= id(nocte_activation_distance).state) return {"Blisko"};
-      if (cm <= id(nocte_activation_distance).state + 20.0f) return {"Strefa histerezy"};
-      return {"Daleko"};
+      if (id(nocte_target_zone) == 1) return {"Do Odleglosc 1 (Wake)"};
+      if (id(nocte_target_zone) == 2) return {"Odleglosc 1-2 (Sleep)"};
+      if (id(nocte_target_zone) == 3) return {"Za Odleglosc 2 (OFF timer)"};
+      return {"Ustalanie strefy"};
+
+  - platform: template
+    id: nocte_screen_state
+    name: "Nocte Tryb ekranu"
+    icon: mdi:monitor
+    update_interval: 1s
+    lambda: |-
+      if (!id(nocte_presence_switch).state) return {"Tessera / automat OFF"};
+      if (id(nocte_screen_mode) == 3) return {"OFF - podswietlenie 0%"};
+      if (id(nocte_screen_mode) == 2) return {"Sleep"};
+      if (id(nocte_screen_mode) == 1) return {"Wake"};
+      return {"Oczekiwanie na pomiar"};
 
   - platform: template
     id: nocte_presence_status
@@ -348,10 +384,12 @@ text_sensor:
       if (!id(nocte_tof_responds).state) return {"Blad komunikacji VL53L0X"};
       if (id(nocte_tof_sample_last_ms) == 0 ||
           (uint32_t)(millis() - id(nocte_tof_sample_last_ms)) > 4000UL)
-        return {"Brak swiezych danych"};
-      if (id(nocte_target_near)) return {"Obiekt przed panelem"};
-      if (id(display_dimmed)) return {"Ekran wygaszony"};
-      return {"Odliczanie czasu do wygaszenia"};
+        return {"Brak swiezych danych - bez zmian trybu"};
+      if (id(nocte_target_zone) == 1) return {"Wake - strefa 1"};
+      if (id(nocte_target_zone) == 2) return {"Sleep - strefa 2"};
+      if (id(nocte_screen_mode) == 3) return {"OFF - podswietlenie wylaczone"};
+      if (id(nocte_target_zone) == 3) return {"Sleep - odliczanie OFF"};
+      return {"Ustalanie strefy"};
 
 # Wartość na WEJŚCIU template-output po korekcji gamma Tessera.
 # Nie jest to pomiar fizycznego duty ani luminancji LCD.
@@ -434,15 +472,11 @@ sensor:
     accuracy_decimals: 0
     update_interval: 1s
     lambda: |-
-      if (!id(nocte_presence_switch).state) return NAN;
-      if (id(display_dimmed)) return 0.0f;
-      if (!id(nocte_tof_responds).state ||
-          id(nocte_tof_sample_last_ms) == 0 ||
-          (uint32_t)(millis() - id(nocte_tof_sample_last_ms)) > 4000UL ||
-          id(nocte_target_near)) return NAN;
-      const uint32_t elapsed = (uint32_t)(millis() - id(last_touch_ms)) / 1000UL;
-      const float remain = id(nocte_off_delay).state - elapsed;
-      return remain > 0 ? remain : 0.0f;
+      if (!id(nocte_presence_switch).state || !id(nocte_tof_fresh).state) return NAN;
+      if (id(nocte_screen_mode) == 3) return 0.0f;
+      if (id(nocte_target_zone) != 3 || id(nocte_far_since_ms) == 0) return NAN;
+      const float elapsed_s = (uint32_t)(millis() - id(nocte_far_since_ms)) / 1000.0f;
+      return std::max(0.0f, id(nocte_off_delay).state - elapsed_s);
 
 # Precyzyjna regulacja testowa GPIO6: omija gamma i suwak Tessera.
 # 0% zawsze fizycznie wylacza przetwornice przez BL_EN.
@@ -474,16 +508,29 @@ number:
 
   - platform: template
     id: nocte_activation_distance
-    name: "Nocte Odleglosc aktywacji"
+    name: "Nocte Odleglosc 1"
     icon: mdi:map-marker-distance
     unit_of_measurement: "cm"
-    min_value: 30
+    min_value: 20
     max_value: 150
     step: 5
     mode: slider
     optimistic: true
     restore_value: true
     initial_value: 80
+
+  - platform: template
+    id: nocte_distance_2
+    name: "Nocte Odleglosc 2"
+    icon: mdi:map-marker-distance
+    unit_of_measurement: "cm"
+    min_value: 30
+    max_value: 200
+    step: 5
+    mode: slider
+    optimistic: true
+    restore_value: true
+    initial_value: 140
 
   - platform: template
     id: nocte_off_delay
@@ -632,21 +679,27 @@ switch:
     name: "Nocte Automatyczne wybudzanie"
     icon: mdi:motion-sensor
     optimistic: true
-    restore_mode: RESTORE_DEFAULT_OFF  # nie przejmuj sterowania dopoki czujniki nie sa sprawdzone
+    restore_mode: RESTORE_DEFAULT_OFF
     turn_on_action:
       - lambda: |-
-          if (id(nocte_target_near) && id(nocte_tof_fresh).state && id(display_dimmed)) {
-            id(nocte_auto_dimmed) = false;
-            id(wake_display).execute();
-          }
+          id(nocte_screen_mode) = 0;
+          id(nocte_far_since_ms) = 0;
+          id(nocte_manual_grace_until_ms) = 0;
+          id(nocte_auto_dimmed) = false;
+          ESP_LOGI("nocte", "Automatyka ON: prog 1=%.0f cm, prog 2=%.0f cm, OFF po %.0f s",
+                   id(nocte_activation_distance).state, id(nocte_distance_2).state,
+                   id(nocte_off_delay).state);
     turn_off_action:
       - lambda: |-
-          // Przy wylaczeniu automatyki przywroc standardowe czuwanie Tessera.
-          if (id(nocte_auto_dimmed)) {
-            id(nocte_auto_dimmed) = false;
-            id(sleep_requested) = false;
-            if (id(display_dimmed)) id(wake_display).execute();
-          }
+          // Oddanie sterowania Tessera; likwidacja wymuszonego BL_EN=0.
+          const bool owned = id(nocte_auto_dimmed);
+          id(nocte_screen_mode) = 0;
+          id(nocte_far_since_ms) = 0;
+          id(nocte_manual_grace_until_ms) = 0;
+          id(nocte_auto_dimmed) = false;
+          id(sleep_requested) = false;
+          if (owned && id(display_dimmed)) id(wake_display).execute();
+          else id(apply_screen_settings).execute();
 
 interval:
   # Tanie sondowanie magistrali poza petla renderowania LVGL, bez retry/spin.
@@ -660,63 +713,95 @@ interval:
           const auto tof_err = id(touch_bus).write_readv(0x29, &reg, 1, &model, 1);
           id(nocte_tof_responds).publish_state(tof_err == i2c::ERROR_OK && model == 0xEE);
 
-  # Histereza 20 cm i dwa kolejne pomiary spelniajace warunek (>1 s).
-  # Awaria lub brak nowych danych: zadnego automatycznego wybudzania/wygaszania.
-  # W takim przypadku Tessera zachowuje wlasne standardowe czuwanie.
+  # Trzy strefy: <=D1 Wake, D1..D2 Sleep, >D2 Sleep i OFF po czasie.
+  # Dwa kolejne odczyty potwierdzaja zmiane strefy. Awaria I2C -> bez akcji.
   - interval: 1s
     then:
       - lambda: |-
           const uint32_t now = millis();
           if (!id(nocte_tof_fresh).state) {
+            id(nocte_target_zone) = 0;
+            id(nocte_candidate_zone) = 0;
+            id(nocte_candidate_count) = 0;
             id(nocte_target_near) = false;
-            id(nocte_near_hits) = 0;
-            id(nocte_far_hits) = 0;
+            id(nocte_far_since_ms) = 0;
             return;
           }
 
           const float cm = id(nocte_tof_distance_cm);
-          const float enter_cm = id(nocte_activation_distance).state;
-          const float leave_cm = enter_cm + 20.0f;
-          const bool in_zone = std::isfinite(cm) && cm >= 4.0f && cm <= enter_cm;
-          const bool out_zone = !std::isfinite(cm) || cm > leave_cm;
-
-          if (!id(nocte_target_near)) {
-            id(nocte_far_hits) = 0;
-            if (in_zone) {
-              if (++id(nocte_near_hits) >= 2) {
-                id(nocte_target_near) = true;
-                id(nocte_near_hits) = 0;
-                if (id(nocte_presence_switch).state) {
-                  id(last_touch_ms) = now;
-                  id(nocte_auto_dimmed) = false;
-                  if (id(display_dimmed)) id(wake_display).execute();
-                }
-              }
-            } else id(nocte_near_hits) = 0;
-          } else {
-            id(nocte_near_hits) = 0;
-            if (out_zone) {
-              if (++id(nocte_far_hits) >= 2) {
-                id(nocte_target_near) = false;
-                id(nocte_far_hits) = 0;
-              }
-            } else id(nocte_far_hits) = 0;
+          const float d1 = id(nocte_activation_distance).state;
+          // Prog 2 musi byc przynajmniej 10 cm dalej niz prog 1.
+          const float d2 = std::max(id(nocte_distance_2).state, d1 + 10.0f);
+          // Przy komunikacji I2C OK, NaN = brak celu w zasiegu (strefa 3).
+          const int candidate = !std::isfinite(cm) ? 3 : (cm <= d1 ? 1 : (cm <= d2 ? 2 : 3));
+          if (candidate != id(nocte_candidate_zone)) {
+            id(nocte_candidate_zone) = candidate;
+            id(nocte_candidate_count) = 1;
+          } else if (id(nocte_candidate_count) < 2) {
+            ++id(nocte_candidate_count);
           }
+          if (id(nocte_candidate_count) >= 2 && id(nocte_target_zone) != candidate) {
+            id(nocte_target_zone) = candidate;
+            id(nocte_far_since_ms) = candidate == 3 ? now : 0;
+            id(nocte_manual_grace_until_ms) = 0;
+            ESP_LOGI("nocte", "Strefa=%d, dystans=%.1fcm, progi=%.0f/%.0fcm",
+                     candidate, cm, d1, d2);
+          }
+          id(nocte_target_near) = id(nocte_target_zone) == 1;
+          if (!id(nocte_presence_switch).state || id(nocte_target_zone) == 0) return;
+          // W trakcie alarmu, kalibracji lub dotyku nie przerywaj interakcji.
+          if (id(alert_active) || id(calibration_active) || id(touch_down)) return;
 
-          if (!id(nocte_presence_switch).state) return;
-          if (id(nocte_target_near)) {
-            // Nie pozwalaj wbudowanemu licznikowi Tessera wygasic ekranu
-            // gdy przed panelem ciagle jest czlowiek.
+          if (id(nocte_target_zone) == 1) {
+            id(nocte_manual_grace_until_ms) = 0;
+            id(nocte_far_since_ms) = 0;
+            id(nocte_screen_mode) = 1;
+            id(nocte_auto_dimmed) = false;
             id(last_touch_ms) = now;
+            if (id(display_dimmed)) id(wake_display).execute();
             return;
           }
-          // Dotkniecie ekranu rowniez resetuje last_touch_ms w kodzie Tessera.
-          if (!id(display_dimmed) &&
-              (uint32_t)(now - id(last_touch_ms)) >=
-                  (uint32_t)(id(nocte_off_delay).state * 1000.0f)) {
+
+          // Dotyk/HA moze wybudzic panel w Sleep lub OFF. Daj 10 s na obsluge.
+          if (id(nocte_screen_mode) >= 2 && !id(display_dimmed)) {
+            id(nocte_screen_mode) = 1;
+            id(nocte_manual_grace_until_ms) = now + 10000UL;
+            if (id(nocte_target_zone) == 3) id(nocte_far_since_ms) = now;
+          }
+          if (id(nocte_manual_grace_until_ms) != 0) {
+            if ((uint32_t)(now - id(last_touch_ms)) < 1500UL) {
+              id(nocte_manual_grace_until_ms) = now + 10000UL;
+              if (id(nocte_target_zone) == 3) id(nocte_far_since_ms) = now;
+            }
+            if ((int32_t)(now - id(nocte_manual_grace_until_ms)) < 0) return;
+            id(nocte_manual_grace_until_ms) = 0;
+          }
+
+          // Strefa 2 oraz poczatek strefy 3: zwykly Sleep Tessera.
+          if (id(nocte_screen_mode) != 2 && id(nocte_screen_mode) != 3) {
+            id(nocte_screen_mode) = 2;
             id(nocte_auto_dimmed) = true;
-            // Zabezpiecza wylaczenie nawet gdy standardowy standby Tessera
-            // zostal wylaczony; wake_display kasuje sleep_requested.
             id(sleep_requested) = true;
-            id(dim_display).execute();
+            if (!id(display_dimmed)) id(dim_display).execute();
+            else id(apply_screen_settings).execute();
+          } else if (id(nocte_target_zone) == 2 && id(nocte_screen_mode) == 3) {
+            // Wrociles z OFF do strefy 2: przywroc jasnosc Sleep.
+            id(nocte_screen_mode) = 2;
+            id(nocte_auto_dimmed) = true;
+            id(sleep_requested) = true;
+            id(apply_screen_settings).execute();
+          }
+
+          if (id(nocte_target_zone) != 3) return;
+          if (id(nocte_far_since_ms) == 0) id(nocte_far_since_ms) = now;
+          const uint32_t delay_ms = (uint32_t)(id(nocte_off_delay).state * 1000.0f);
+          if (id(nocte_screen_mode) != 3 &&
+              (uint32_t)(now - id(nocte_far_since_ms)) >= delay_ms) {
+            id(nocte_screen_mode) = 3;
+            id(nocte_auto_dimmed) = true;
+            id(sleep_requested) = true;
+            // Output=0 wymusza BL_EN=0; hook APPLY_BACKLIGHT utrzymuje OFF.
+            id(set_backlight).execute(0, 250);
+            ESP_LOGI("nocte", "OFF po %lu ms poza progiem 2",
+                     (unsigned long)(now - id(nocte_far_since_ms)));
           }
