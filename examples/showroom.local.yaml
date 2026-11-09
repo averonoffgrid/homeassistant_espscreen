@@ -125,7 +125,8 @@ globals:
     type: int
     restore_value: no
     initial_value: '0'
-  - id: nocte_far_since_ms
+  # Odliczanie do OFF po opuszczeniu Wake lub Sleep.
+  - id: nocte_off_since_ms
     type: uint32_t
     restore_value: no
     initial_value: '0'
@@ -385,9 +386,10 @@ text_sensor:
       if (id(nocte_tof_sample_last_ms) == 0 ||
           (uint32_t)(millis() - id(nocte_tof_sample_last_ms)) > 4000UL)
         return {"Brak swiezych danych - bez zmian trybu"};
-      if (id(nocte_target_zone) == 1) return {"Wake - strefa 1"};
-      if (id(nocte_target_zone) == 2) return {"Sleep - strefa 2"};
       if (id(nocte_screen_mode) == 3) return {"OFF - podswietlenie wylaczone"};
+      if (id(nocte_target_zone) == 1) return {"Wake - strefa 1"};
+      if (id(nocte_target_zone) == 2 && id(nocte_off_since_ms) != 0) return {"Sleep - odliczanie OFF po Wake"};
+      if (id(nocte_target_zone) == 2) return {"Sleep - strefa 2"};
       if (id(nocte_target_zone) == 3) return {"Sleep - odliczanie OFF"};
       return {"Ustalanie strefy"};
 
@@ -474,8 +476,8 @@ sensor:
     lambda: |-
       if (!id(nocte_presence_switch).state || !id(nocte_tof_fresh).state) return NAN;
       if (id(nocte_screen_mode) == 3) return 0.0f;
-      if (id(nocte_target_zone) != 3 || id(nocte_far_since_ms) == 0) return NAN;
-      const float elapsed_s = (uint32_t)(millis() - id(nocte_far_since_ms)) / 1000.0f;
+      if (id(nocte_target_zone) == 1 || id(nocte_off_since_ms) == 0) return NAN;
+      const float elapsed_s = (uint32_t)(millis() - id(nocte_off_since_ms)) / 1000.0f;
       return std::max(0.0f, id(nocte_off_delay).state - elapsed_s);
 
 # Precyzyjna regulacja testowa GPIO6: omija gamma i suwak Tessera.
@@ -683,7 +685,7 @@ switch:
     turn_on_action:
       - lambda: |-
           id(nocte_screen_mode) = 0;
-          id(nocte_far_since_ms) = 0;
+          id(nocte_off_since_ms) = 0;
           id(nocte_manual_grace_until_ms) = 0;
           id(nocte_auto_dimmed) = false;
           ESP_LOGI("nocte", "Automatyka ON: prog 1=%.0f cm, prog 2=%.0f cm, OFF po %.0f s",
@@ -694,7 +696,7 @@ switch:
           // Oddanie sterowania Tessera; likwidacja wymuszonego BL_EN=0.
           const bool owned = id(nocte_auto_dimmed);
           id(nocte_screen_mode) = 0;
-          id(nocte_far_since_ms) = 0;
+          id(nocte_off_since_ms) = 0;
           id(nocte_manual_grace_until_ms) = 0;
           id(nocte_auto_dimmed) = false;
           id(sleep_requested) = false;
@@ -713,7 +715,8 @@ interval:
           const auto tof_err = id(touch_bus).write_readv(0x29, &reg, 1, &model, 1);
           id(nocte_tof_responds).publish_state(tof_err == i2c::ERROR_OK && model == 0xEE);
 
-  # Trzy strefy: <=D1 Wake, D1..D2 Sleep, >D2 Sleep i OFF po czasie.
+  # D1 Wake, D1..D2 Sleep, >D2 Sleep. OFF z opoznieniem po WYJSCIU
+  # z Wake (takze do Sleep lub prosto poza D2) lub po WYJSCIU z Sleep.
   # Dwa kolejne odczyty potwierdzaja zmiane strefy. Awaria I2C -> bez akcji.
   - interval: 1s
     then:
@@ -733,7 +736,7 @@ interval:
             id(nocte_candidate_zone) = 0;
             id(nocte_candidate_count) = 0;
             id(nocte_target_near) = false;
-            id(nocte_far_since_ms) = 0;
+            id(nocte_off_since_ms) = 0;
             return;
           }
 
@@ -749,12 +752,31 @@ interval:
           } else if (id(nocte_candidate_count) < 2) {
             ++id(nocte_candidate_count);
           }
+          bool zone_changed = false;
           if (id(nocte_candidate_count) >= 2 && id(nocte_target_zone) != candidate) {
+            const int previous_zone = id(nocte_target_zone);
             id(nocte_target_zone) = candidate;
-            id(nocte_far_since_ms) = candidate == 3 ? now : 0;
+            zone_changed = true;
             id(nocte_manual_grace_until_ms) = 0;
-            ESP_LOGI("nocte", "Strefa=%d, dystans=%.1fcm, progi=%.0f/%.0fcm",
-                     candidate, cm, d1, d2);
+            if (candidate == 1) {
+              // Powrot do Wake zawsze zeruje zegar OFF.
+              id(nocte_off_since_ms) = 0;
+            } else if (previous_zone == 1) {
+              // Z Wake do Sleep LUB bezposrednio za D2: odliczaj OFF od teraz.
+              id(nocte_off_since_ms) = now;
+            } else if (previous_zone == 2 && candidate == 3) {
+              // Z Sleep poza D2: uruchom zegar, o ile nie biegnie od wyjscia z Wake.
+              if (id(nocte_off_since_ms) == 0) id(nocte_off_since_ms) = now;
+            } else if (candidate == 3 && id(nocte_off_since_ms) == 0) {
+              // Start przy pustym otoczeniu, takze bez poprzedniego Wake/Sleep.
+              id(nocte_off_since_ms) = now;
+            } else if (candidate == 2 && id(nocte_screen_mode) == 3) {
+              // Powrot z daleka do Sleep po OFF budzi Sleep; stary timer nie moze
+              // od razu wygasic go ponownie.
+              id(nocte_off_since_ms) = 0;
+            }
+            ESP_LOGI("nocte", "Strefa %d -> %d, dystans=%.1fcm, progi=%.0f/%.0fcm",
+                     previous_zone, candidate, cm, d1, d2);
           }
           id(nocte_target_near) = id(nocte_target_zone) == 1;
           if (!id(nocte_presence_switch).state || id(nocte_target_zone) == 0) return;
@@ -763,7 +785,7 @@ interval:
 
           if (id(nocte_target_zone) == 1) {
             id(nocte_manual_grace_until_ms) = 0;
-            id(nocte_far_since_ms) = 0;
+            id(nocte_off_since_ms) = 0;
             id(nocte_screen_mode) = 1;
             id(nocte_auto_dimmed) = false;
             id(last_touch_ms) = now;
@@ -775,12 +797,12 @@ interval:
           if (id(nocte_screen_mode) >= 2 && !id(display_dimmed)) {
             id(nocte_screen_mode) = 1;
             id(nocte_manual_grace_until_ms) = now + 10000UL;
-            if (id(nocte_target_zone) == 3) id(nocte_far_since_ms) = now;
+            id(nocte_off_since_ms) = now;
           }
           if (id(nocte_manual_grace_until_ms) != 0) {
             if ((uint32_t)(now - id(last_touch_ms)) < 1500UL) {
               id(nocte_manual_grace_until_ms) = now + 10000UL;
-              if (id(nocte_target_zone) == 3) id(nocte_far_since_ms) = now;
+              id(nocte_off_since_ms) = now;
             }
             if ((int32_t)(now - id(nocte_manual_grace_until_ms)) < 0) return;
             id(nocte_manual_grace_until_ms) = 0;
@@ -793,7 +815,7 @@ interval:
             id(sleep_requested) = true;
             if (!id(display_dimmed)) id(dim_display).execute();
             else id(apply_screen_settings).execute();
-          } else if (id(nocte_target_zone) == 2 && id(nocte_screen_mode) == 3) {
+          } else if (zone_changed && id(nocte_target_zone) == 2 && id(nocte_screen_mode) == 3) {
             // Wrociles z OFF do strefy 2: przywroc jasnosc Sleep.
             id(nocte_screen_mode) = 2;
             id(nocte_auto_dimmed) = true;
@@ -801,16 +823,16 @@ interval:
             id(apply_screen_settings).execute();
           }
 
-          if (id(nocte_target_zone) != 3) return;
-          if (id(nocte_far_since_ms) == 0) id(nocte_far_since_ms) = now;
+          // Timer dziala rowniez w Sleep po opuszczeniu Wake (bez D2).
+          if (id(nocte_off_since_ms) == 0) return;
           const uint32_t delay_ms = (uint32_t)(id(nocte_off_delay).state * 1000.0f);
           if (id(nocte_screen_mode) != 3 &&
-              (uint32_t)(now - id(nocte_far_since_ms)) >= delay_ms) {
+              (uint32_t)(now - id(nocte_off_since_ms)) >= delay_ms) {
             id(nocte_screen_mode) = 3;
             id(nocte_auto_dimmed) = true;
             id(sleep_requested) = true;
             // Output=0 wymusza BL_EN=0; hook APPLY_BACKLIGHT utrzymuje OFF.
             id(set_backlight).execute(0, 250);
-            ESP_LOGI("nocte", "OFF po %lu ms poza progiem 2",
-                     (unsigned long)(now - id(nocte_far_since_ms)));
+            ESP_LOGI("nocte", "OFF po %lu ms od opuszczenia Wake/Sleep",
+                     (unsigned long)(now - id(nocte_off_since_ms)));
           }
